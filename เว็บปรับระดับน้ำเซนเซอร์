@@ -1,0 +1,91 @@
+//การป้องกันไฟล์ซ้ำ
+#pragma once
+
+//ตรวจสอบว่าอุปกรณ์ที่ส่งคำขอเข้ามาเชื่อมต่อผ่าน Access Point ของ ESP32 ตามเงื่อนไขที่กำหนดหรือไม่
+//การตรวจสอบนี้ไม่ได้เป็นระบบล็อกอินหรือการยืนยันตัวตนที่สมบูรณ์ แต่เป็นการตรวจสอบตาม IP ของการเชื่อมต่อ
+bool allowCustomerPortal() {
+  if (configServer.client().localIP() == WiFi.softAPIP()) return true;
+  configServer.send(403, "text/plain", "Connect to ESP32-Flood-Setup first");
+  return false;
+}
+//แปลงค่าตัวเลขให้อยู่ในรูปแบบที่ส่งผ่าน JSON ได้
+String jsonNumber(float value) {
+  return isfinite(value) ? String(value, 1) : String("null");
+}
+
+//ลงทะเบียนเส้นทาง URL ที่เว็บเซิร์ฟเวอร์ต้องตอบสนองเมื่อผู้ใช้เข้าถึงหน้าเว็บ
+void registerCustomerPortal() {
+  configServer.on("/status", HTTP_GET, []() {
+    if (!allowCustomerPortal()) return;
+    bool fresh = sensorHasUpdated && millis() - lastSensorUpdate <= 10000; //ตรวจสอบความใหม่ของข้อมูล
+    float distance = fresh ? lastDistanceCm : NAN;//คำนวณความสูงน้ำ
+    float height = waterHeightCm(distance);
+    bool connected = WiFi.status() == WL_CONNECTED && !wifiConnectRequested && !wifiConnecting;//ตรวจสอบการเชื่อมต่อ Wi-Fi
+    String json = "{\"connected\":" + String(connected ? "true" : "false"); //สร้างข้อมูล JSON
+    json += ",\"configured\":" + String(alertSettingsConfigured ? "true" : "false");
+    json += ",\"raining\":" + String(lastIsRaining ? "true" : "false");
+    json += ",\"fresh\":" + String(fresh ? "true" : "false");
+    json += ",\"distance\":" + jsonNumber(distance) + ",\"height\":" + jsonNumber(height);
+    json += ",\"temperature\":" + jsonNumber(fresh ? lastTemperature : NAN);
+    json += ",\"humidity\":" + jsonNumber(fresh ? lastHumidity : NAN) + "}";
+    configServer.sendHeader("Cache-Control", "no-store");//ส่งข้อมูลให้เบราว์เซอร์
+    configServer.send(200, "application/json", json);
+  });
+  configServer.on("/settings", HTTP_GET, []() { //เส้นทาง /settings สำหรับสร้างหน้าเว็บ
+    if (!allowCustomerPortal()) return;
+    String html = R"HTML(<!doctype html><html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ระดับน้ำและการแจ้งเตือน</title><style>
+*{box-sizing:border-box}body{font-family:system-ui;background:#edf3f8;color:#163047;margin:0;padding:24px 16px}main{max-width:760px;margin:auto}.card{background:white;border-radius:16px;padding:22px;margin-bottom:18px;border:1px solid #dce6ef}h1{font-size:26px;margin:10px 0}h2{font-size:20px}.reading{font-size:44px;font-weight:700;color:#096ba5}small,.muted{color:#567084}label{display:block;margin:16px 0 6px}input{width:100%;padding:12px;border:1px solid #aabecf;border-radius:8px;font:inherit}.grid{display:grid;grid-template-columns:1fr 1fr;gap:0 18px}button{padding:14px;width:100%;background:#0875bd;color:white;border:0;border-radius:10px;font:inherit;margin-top:20px}button:disabled{opacity:.6}a{color:#0868a7}.notice{background:#fff4d9;padding:12px;border-radius:8px}#result{white-space:pre-wrap}@media(max-width:520px){.grid{grid-template-columns:1fr}}</style></head><body><main>
+<h1>ระดับน้ำและการแจ้งเตือน</h1><p>ความสูงน้ำวัดจากก้นถังหรือจุดอ้างอิงที่คุณกำหนด</p>
+<section class="card"><h2>ระดับน้ำปัจจุบัน</h2><div class="reading" id="height">กำลังอ่าน…</div><p id="deviceStatus" role="status"></p><p id="measurements"></p><p class="notice" id="setupNotice">@notice@</p><a href="/?wifi=1">เปลี่ยน Wi-Fi</a></section>
+<section class="card"><h2>ตั้งค่าระดับแจ้งเตือน</h2><form id="settingsForm">
+<label for="reference">ความสูงหัววัดจากจุดอ้างอิง (ซม.)</label><input id="reference" name="reference" type="number" min="25" max="450" step="0.1" required value="@reference@"><small>วัดจากหน้าหัววัดลงถึงก้นถังหรือจุดศูนย์เดียวกับที่ใช้วัดน้ำ</small><p id="preview" class="muted"></p>
+<div class="grid"><div><label for="normal">กลับสู่ปกติเมื่อน้ำต่ำกว่าหรือเท่ากับ (ซม.)</label><input id="normal" name="normal" type="number" min="0" step="0.1" required value="@normal@"></div><div><label for="warning">เฝ้าระวังเมื่อน้ำสูงตั้งแต่ (ซม.)</label><input id="warning" name="warning" type="number" min="0" step="0.1" required value="@warning@"></div><div><label for="critical">วิกฤติเมื่อน้ำสูงตั้งแต่ (ซม.)</label><input id="critical" name="critical" type="number" min="0" step="0.1" required value="@critical@"></div></div>
+<p class="notice" id="range"></p><small>ระดับปกติต้องต่ำกว่าเฝ้าระวัง และเฝ้าระวังต้องต่ำกว่าวิกฤติ ช่วงระหว่างปกติกับเฝ้าระวังจะไม่ส่งข้อความ</small>
+<div><label for="interval">เวลาห่างระหว่างข้อความ (วินาที)</label><input id="interval" name="interval" type="number" min="10" max="3600" step="1" required value="@interval@"></div>
+<p>แจ้งเตือนตามระดับน้ำ: วิกฤติ 2 ครั้ง เฝ้าระวัง 2 ครั้ง กลับสู่ปกติ 1 ครั้ง และแจ้ง 1 ครั้งเมื่อตรวจพบฝนตก</p><button id="saveSettings" type="submit">บันทึกการตั้งค่า</button><p id="result" role="status"></p></form></section></main><script>
+let latest=null;
+const form=document.getElementById('settingsForm'),reference=document.getElementById('reference');
+function updateRange(){const h=Number(reference.value),max=h-25;document.getElementById('range').textContent='ช่วงความสูงน้ำที่วัดได้: 0 ถึง '+Math.max(0,max).toFixed(1)+' ซม. ต้องเหลือระยะจากผิวน้ำถึงหัววัดอย่างน้อย 25 ซม.';for(const id of ['normal','warning','critical'])document.getElementById(id).max=max;if(latest&&latest.distance!==null){const preview=h-latest.distance;document.getElementById('preview').textContent=preview>=0?'ความสูงที่คำนวณจากค่าหัววัดที่กรอก: '+preview.toFixed(1)+' ซม. (ยังไม่บันทึก)':'ระยะที่อ่านได้มากกว่าความสูงหัววัด ตรวจจุดอ้างอิง';}else document.getElementById('preview').textContent='';}
+reference.addEventListener('input',updateRange);updateRange();
+async function refresh(){try{const r=await fetch('/status',{cache:'no-store'});if(!r.ok)throw new Error();latest=await r.json();document.getElementById('height').textContent=latest.height===null?(latest.configured?'อ่านความสูงไม่ได้':'ยังไม่ได้ตั้งจุดอ้างอิง'):latest.height.toFixed(1)+' ซม.';document.getElementById('deviceStatus').textContent=(latest.connected?'Wi-Fi เชื่อมต่อแล้ว':'Wi-Fi ยังไม่เชื่อมต่อ')+' · '+(latest.raining?'ตรวจพบฝนตก':'ไม่ตรวจพบฝน');document.getElementById('measurements').textContent='ระยะจากหัววัดถึงผิวน้ำ: '+(latest.distance===null?'อ่านไม่ได้':latest.distance.toFixed(1)+' ซม.')+' · อุณหภูมิ: '+(latest.temperature===null?'อ่านไม่ได้':latest.temperature.toFixed(1)+' °C');document.getElementById('setupNotice').textContent=!latest.configured?'กรอกจุดอ้างอิงและระดับแจ้งเตือน แล้วบันทึกก่อนเริ่มเฝ้าระดับน้ำ':(!latest.fresh?'ข้อมูลยังไม่อัปเดต':(latest.distance===null?'ไม่มีค่าระยะที่เชื่อถือได้ ตรวจระยะบอดและตำแหน่งหัววัด':'ใช้ค่าที่บันทึกไว้คำนวณระดับน้ำ'));updateRange();}catch(e){document.getElementById('height').textContent='ขาดการเชื่อมต่อ';document.getElementById('deviceStatus').textContent='เชื่อมต่อ Wi-Fi ของ ESP32 แล้วลองอีกครั้ง';}}
+form.addEventListener('submit',async event=>{event.preventDefault();const message=document.getElementById('result'),button=document.getElementById('saveSettings');const n=Number(form.elements.normal.value),w=Number(form.elements.warning.value),c=Number(form.elements.critical.value),ref=Number(reference.value);if(!(0<=n&&n<w&&w<c&&c<=ref-25)){message.textContent='ตรวจระดับ: ปกติ < เฝ้าระวัง < วิกฤติ และวิกฤติต้องไม่เกินความสูงหัววัดลบ 25 ซม.';return;}button.disabled=true;try{const r=await fetch('/settings/save',{method:'POST',body:new URLSearchParams(new FormData(form))});message.textContent=await r.text();if(r.ok)await refresh();}catch(e){message.textContent='ยังยืนยันการบันทึกไม่ได้ ตรวจการเชื่อมต่อแล้วลองใหม่';}finally{button.disabled=false;}});
+refresh();setInterval(refresh,2000);
+</script></body></html>)HTML";
+    html.replace("@notice@", alertSettingsConfigured ? "ตั้งค่าแล้ว" : "ยังไม่ได้บันทึกจุดอ้างอิงและระดับแจ้งเตือน");
+    html.replace("@reference@", String(alertSettings.referenceCm, 1));
+    html.replace("@normal@", String(alertSettings.normalCm, 1));
+    html.replace("@warning@", String(alertSettings.warningCm, 1));
+    html.replace("@critical@", String(alertSettings.criticalCm, 1));
+    html.replace("@interval@", String(alertSettings.intervalSeconds));
+    configServer.sendHeader("Cache-Control", "no-store");
+    configServer.send(200, "text/html; charset=utf-8", html);
+  });
+  configServer.on("/settings/save", HTTP_POST, []() {
+    if (!allowCustomerPortal()) return;
+    AlertSettings candidate;
+    float interval;
+    bool parsed = parseSettingNumber(configServer.arg("reference"), candidate.referenceCm) &&
+      parseSettingNumber(configServer.arg("normal"), candidate.normalCm) &&
+      parseSettingNumber(configServer.arg("warning"), candidate.warningCm) &&
+      parseSettingNumber(configServer.arg("critical"), candidate.criticalCm) &&
+      parseSettingNumber(configServer.arg("interval"), interval);
+    if (!parsed || interval < 10 || interval > 3600 || floorf(interval) != interval) {
+      configServer.send(400, "text/plain; charset=utf-8", "กรอกตัวเลขให้ครบ และเวลาห่างระหว่างข้อความเป็นจำนวนเต็ม 10–3600 วินาที");
+      return;
+    }
+    candidate.intervalSeconds = (uint32_t)interval;
+    if (!validAlertSettings(candidate)) {
+      configServer.send(400, "text/plain; charset=utf-8", "ระดับต้องเรียง ปกติ < เฝ้าระวัง < วิกฤติ และวิกฤติต้องไม่เกินความสูงหัววัดลบ 25 ซม.");
+      return;
+    }
+    if (!saveAlertSettings(candidate)) {
+      configServer.send(500, "text/plain; charset=utf-8", "บันทึกไม่สำเร็จ การตั้งค่าเดิมยังใช้งานอยู่");
+      return;
+    }
+    waterState = WATER_UNCLASSIFIED;
+    waterAlertsSent = 0;
+    waterAlertAttempted = false;
+    configServer.send(200, "text/plain; charset=utf-8", "บันทึกแล้ว ใช้ระดับใหม่ในรอบอ่านถัดไป และเก็บไว้หลังปิดไฟ");
+  });
+}
+
